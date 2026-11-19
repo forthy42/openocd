@@ -104,6 +104,7 @@ static struct target_type *target_types[] = {
 	&mem_ap_target,
 	&mips_m4k_target,
 	&mips_mips64_target,
+	&oc_riscv_target,
 	&or1k_target,
 	&quark_d20xx_target,
 	&quark_x10xx_target,

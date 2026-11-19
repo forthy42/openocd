@@ -147,7 +147,9 @@ static int oc_riscv_adapter_speed(struct target *target, int speed)
 	tbuf.c_iflag |= CLOCAL;
 	cfsetispeed(&tbuf, speed);
 	cfsetospeed(&tbuf, speed);
-	if(!tcsetattr(fileno(oc_riscv->uart), 0, &tbuf))
+	int retval = tcsetattr(fileno(oc_riscv->uart), 0, &tbuf);
+	LOG_DEBUG("Set speed to %d, returned %d", speed, retval);
+	if(!retval)
 		return ERROR_OK;
 	else
 		return ERROR_TARGET_FAILURE;
@@ -161,6 +163,7 @@ static void oc_riscv_open_target(struct target *target)
 		 "/dev/ttyUSB%d", oc_riscv->uart_id);
 	dbgindex = 0;
 	oc_riscv->uart = fopen(uart_filename, "r+");
+	LOG_DEBUG("Open UART %s=%d", uart_filename, fileno(oc_riscv->uart));
 	oc_riscv_adapter_speed(target, TERMSPEED);
 	oc_riscv->uart_configured = 1;
 }
@@ -419,13 +422,15 @@ static int oc_riscv_init(struct command_context *cmd_ctx, struct target *target)
 
 static int oc_riscv_devicename(struct target *target)
 {
-        char devicename[8];
+        char devicename[9];
 	
 	target->state = TARGET_UNKNOWN;
 	
 	oc_riscv_write_byte('I');
 	oc_riscv_writeout(target);
+	devicename[8]=0;
 	oc_riscv_readin(target, (uint8_t*)devicename, 8);
+	LOG_DEBUG("Read Devicename = %s", devicename);
 	
 	if(!strncmp(devicename, "1¢RISCV", 8))
 		return ERROR_OK;
@@ -561,6 +566,16 @@ static int oc_riscv_write_core_reg(struct target *target, unsigned int num)
 static const char *oc_riscv_get_gdb_arch(const struct target *target)
 {
 	return "riscv:rv32";
+}
+
+static int oc_riscv_add_breakpoint(struct target *target, struct breakpoint *breakpoint)
+{
+	return ERROR_TARGET_RESOURCE_NOT_AVAILABLE; // stub
+}
+
+static int oc_riscv_remove_breakpoint(struct target *target, struct breakpoint *breakpoint)
+{
+	return ERROR_OK;
 }
 
 static int oc_riscv_get_gdb_reg_list(struct target *target, struct reg **reg_list[],
@@ -713,14 +728,17 @@ static int oc_riscv_examine(struct target *target)
 	/* get pointers to arch-specific information */
 	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
 
-	if (!target_was_examined(target)) {
-		if (!oc_riscv->uart_configured) {
-			oc_riscv_open_target(target);
-		}
-		return oc_riscv_devicename(target);
-	}
+	LOG_DEBUG("Examine OC RISCV connection");
 
-	return ERROR_OK;
+	if (!oc_riscv->uart_configured) {
+		LOG_DEBUG("Open Target");
+		oc_riscv_open_target(target);
+	}
+	int retval = oc_riscv_devicename(target);
+	if(retval == ERROR_OK)
+		target_set_examined(target);
+
+	return retval;
 }
 
 static int oc_riscv_jim_configure(struct target *target, struct jim_getopt_info *goi)
@@ -777,6 +795,8 @@ struct target_type oc_riscv_target = {
 	.halt = oc_riscv_halt,
 	.resume = oc_riscv_resume,
 	.step = oc_riscv_step,
+	.add_breakpoint = oc_riscv_add_breakpoint,
+	.remove_breakpoint = oc_riscv_remove_breakpoint,
 
 	.get_gdb_arch = oc_riscv_get_gdb_arch,
 	.get_gdb_reg_list = oc_riscv_get_gdb_reg_list,
