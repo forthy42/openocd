@@ -372,8 +372,7 @@ static int oc_riscv_save_context(struct target *target)
 	oc_riscv_read_regs(target, oc_riscv->core_regs);
 
 	for (i = 0; i < OC_RISCV_NUM_REGS; i++) {
-		if (!oc_riscv->core_cache->reg_list[i].valid)
-			oc_riscv->read_core_reg(target, i);
+		oc_riscv->read_core_reg(target, i);
 	}
 
 	return ERROR_OK;
@@ -470,9 +469,20 @@ static int oc_riscv_state(struct target *target, uint8_t query)
 	oc_riscv_readin(target, &state, 1);
 
 	switch(state) {
-	case 'b': target->state = TARGET_HALTED; break;
-	case 'r': target->state = TARGET_RUNNING; break;
-	case 'h': target->state = TARGET_HALTED; break;
+	case 'b':
+		LOG_DEBUG("oc-riscv breakpoint reached");
+		target->state = TARGET_HALTED;
+		target->debug_reason = DBG_REASON_BREAKPOINT;
+		break;
+	case 'r':
+		LOG_DEBUG("oc-riscv running");
+		target->state = TARGET_RUNNING;
+		break;
+	case 'h':
+		LOG_DEBUG("oc-riscv halted");
+		target->state = TARGET_HALTED;
+		target->debug_reason = DBG_REASON_DBGRQ;
+		break;
 	default: return ERROR_TARGET_FAILURE;
 	}
 
@@ -485,7 +495,10 @@ static int oc_riscv_poll(struct target *target)
 
 	switch(target->state) {
 	case TARGET_HALTED:
-	case TARGET_DEBUG_RUNNING: retval = oc_riscv_save_context(target); break;
+	case TARGET_DEBUG_RUNNING:
+		retval = oc_riscv_save_context(target);
+		target_call_event_callbacks(target, TARGET_EVENT_HALTED);
+		break;
 	default: break;
 	}
 	return retval;
@@ -594,28 +607,33 @@ static int oc_riscv_add_breakpoint(struct target *target, struct breakpoint *bre
 {
 	LOG_DEBUG("create breakpoint type %d at %08x",
 		  breakpoint->type, (uint32_t)(breakpoint->address));
-	if (breakpoint->type == BKPT_HARD) {
-		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-	} else {
+	if (breakpoint->type == BKPT_SOFT) {
 		uint32_t ebreak = 0x00100073;
 		oc_riscv_read_memory(target, breakpoint->address,
 				     4, 1, (uint8_t*)breakpoint->orig_instr);
 		oc_riscv_write_memory(target, breakpoint->address,
 				      4, 1, (uint8_t*)&ebreak);
+		fprintf(stderr, "Set breakpoint to %08x, orig inst %08x -> %08x\n",
+			(uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr,
+			ebreak);
+		breakpoint->is_set = true;
 		return ERROR_OK;
+	} else {
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
 }
 
 static int oc_riscv_remove_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
-	if (breakpoint->type == BKPT_HARD) {
-		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
-	} else {
-		// overwrite breakpoint with NOP cleans the cache and
-		// reenables the original instruction
+	if (breakpoint->type == BKPT_SOFT) {
 		oc_riscv_write_memory(target, breakpoint->address,
-				      4, 1, (uint8_t*)breakpoint->orig_instr);
+				      breakpoint->length, 1, (uint8_t*)breakpoint->orig_instr);
+		breakpoint->is_set = false;
+		fprintf(stderr, "Remove breakpoint to %08x, orig inst %08x\n",
+			(uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr);
 		return ERROR_OK;
+	} else {
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
 	}
 }
 
