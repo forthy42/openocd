@@ -769,6 +769,8 @@ static int oc_riscv_step(struct target *target, bool current,
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
+	oc_riscv_restore_context(target);
+
 	if(current) {
 		oc_riscv_write_Einst(JMPNOP);
 		oc_riscv_writeout(target);
