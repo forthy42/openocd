@@ -23,6 +23,7 @@
 #include <target/target.h>
 #include <target/target_type.h>
 #include <target/register.h>
+#include <target/breakpoints.h>
 
 static struct reg_cache *oc_riscv_build_reg_cache(struct target *target);
 static int oc_riscv_read_core_reg(struct target *target, unsigned int num);
@@ -124,6 +125,7 @@ int dbgindex=0;
 #define JMPX1 0x8067
 #define READOUT_HI(i, data) (0x37 | i << 7 | ((data + 0x800) & 0xFFFFF000))
 #define READOUT_LO(i, data) (0x13 | i << 7 | i << 15 | (data & 0xFFF) << 20)
+// Read to register x1
 #define READOPB(offset) (0x8003 | offset << 20)
 #define READOPW(offset) (0x9003 | offset << 20)
 #define READOPL(offset) (0xA003 | offset << 20)
@@ -131,6 +133,7 @@ int dbgindex=0;
 			 (offset & 0x0FF000) |		\
 			 ((offset & 0x000800) << 9) |	\
 			 ((offset & 0x0007FE) << 20))
+// write register x2 to offset(x1)
 #define WRITEOPB(offset) (0x00208023 | offset << 20)
 #define WRITEOPW(offset) (0x00209023 | offset << 20)
 #define WRITEOPL(offset) (0x0020A023 | offset << 20)
@@ -240,18 +243,32 @@ static void oc_riscv_gen_reg_writes(uint32_t pc, uint32_t regs[])
 	for(i=0; i<32; i++)
 		oc_riscv_write_reg(i, regs[i]);
 }
+static uint32_t oc_riscv_read_reg(struct target * target, uint32_t i)
+{
+	uint32_t tmpbuf;
+	oc_riscv_write_Xinst(READREG_INST(i));
+	oc_riscv_writeout(target);
+	oc_riscv_readin(target, (uint8_t*)&tmpbuf, 4);
+	return tmpbuf;
+}
+static uint64_t oc_riscv_read_2regs(struct target * target, uint32_t i, uint32_t j)
+{
+	uint64_t tmpbuf;
+	oc_riscv_write_Xinst(READREG_INST(i));
+	oc_riscv_write_Xinst(READREG_INST(j));
+	oc_riscv_writeout(target);
+	oc_riscv_readin(target, (uint8_t*)&tmpbuf, 8);
+	return tmpbuf;
+}
 static void oc_riscv_write_pc(struct target * target, uint32_t data, uint32_t pc)
 {
 	if(((data-pc) < 0x100000) || ((pc-data) < 0x100000)) {
 		oc_riscv_write_Einst(JMP_IMM((data-pc)) | JMPNOP);
 	} else {
-		uint32_t tmpbuf;
-		oc_riscv_write_Xinst(READREG_INST(1));
-		oc_riscv_writeout(target);
-		oc_riscv_readin(target, (uint8_t*)&tmpbuf, 4);
+		uint32_t x1 = oc_riscv_read_reg(target, 1);
 		oc_riscv_write_Einst(READOUT_HI(1, data));
 		oc_riscv_write_Einst(JMPX1 | ((data & 0xFFF) << 20));
-		oc_riscv_write_reg(1, tmpbuf);
+		oc_riscv_write_reg(1, x1);
 		oc_riscv_writeout(target);
 	}
 }
@@ -266,6 +283,7 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 {
 	int i;
 	uint32_t tmpbuf[count];
+	uint32_t x1 = oc_riscv_read_reg(target, 1);
 	
 	oc_riscv_write_reg(1, addr);
 	for(i=0; i<count; i++) {
@@ -275,6 +293,7 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 		case 4: oc_riscv_write_Xinst(READOPL(i*4)); break;
 		}
 	}
+	oc_riscv_write_reg(1, x1);
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t*)tmpbuf, count*4);
 	for(i=0; i<count; i++) {
@@ -291,7 +310,7 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 		uint32_t addr, int size, int count, const void *buf)
 {
 	int i;
-	
+	uint64_t x1_2 = oc_riscv_read_2regs(target, 1, 2);
 	oc_riscv_write_reg(1, addr);
 	for(i=0; i<count; i++) {
 		switch(size) {
@@ -303,6 +322,8 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 			oc_riscv_write_Einst(WRITEOPL(i*4)); break;
 		}
 	}
+	oc_riscv_write_reg(1, x1_2 & 0xFFFFFFFF);
+	oc_riscv_write_reg(2, x1_2 >> 32);
 	oc_riscv_writeout(target);
 	return ERROR_OK;
 }
@@ -449,6 +470,7 @@ static int oc_riscv_state(struct target *target, uint8_t query)
 	oc_riscv_readin(target, &state, 1);
 
 	switch(state) {
+	case 'b': target->state = TARGET_HALTED; break;
 	case 'r': target->state = TARGET_RUNNING; break;
 	case 'h': target->state = TARGET_HALTED; break;
 	default: return ERROR_TARGET_FAILURE;
@@ -556,7 +578,7 @@ static int oc_riscv_write_core_reg(struct target *target, unsigned int num)
 
 	memcpy(&reg_value, oc_riscv->core_cache->reg_list[num].value, 4);
 	oc_riscv->core_regs[num] = reg_value;
-	LOG_DEBUG("write core reg %i value 0x%" PRIx32, num, reg_value);
+	LOG_DEBUG("write core reg %i value %08x" PRIx32, num, reg_value);
 	oc_riscv->core_cache->reg_list[num].valid = true;
 	oc_riscv->core_cache->reg_list[num].dirty = false;
 
@@ -570,12 +592,31 @@ static const char *oc_riscv_get_gdb_arch(const struct target *target)
 
 static int oc_riscv_add_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
-	return ERROR_TARGET_RESOURCE_NOT_AVAILABLE; // stub
+	LOG_DEBUG("create breakpoint type %d at %08x",
+		  breakpoint->type, (uint32_t)(breakpoint->address));
+	if (breakpoint->type == BKPT_HARD) {
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	} else {
+		uint32_t ebreak = 0x00100073;
+		oc_riscv_read_memory(target, breakpoint->address,
+				     4, 1, (uint8_t*)breakpoint->orig_instr);
+		oc_riscv_write_memory(target, breakpoint->address,
+				      4, 1, (uint8_t*)&ebreak);
+		return ERROR_OK;
+	}
 }
 
 static int oc_riscv_remove_breakpoint(struct target *target, struct breakpoint *breakpoint)
 {
-	return ERROR_OK;
+	if (breakpoint->type == BKPT_HARD) {
+		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+	} else {
+		// overwrite breakpoint with NOP cleans the cache and
+		// reenables the original instruction
+		oc_riscv_write_memory(target, breakpoint->address,
+				      4, 1, (uint8_t*)breakpoint->orig_instr);
+		return ERROR_OK;
+	}
 }
 
 static int oc_riscv_get_gdb_reg_list(struct target *target, struct reg **reg_list[],
