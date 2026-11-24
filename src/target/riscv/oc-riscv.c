@@ -461,6 +461,8 @@ static int oc_riscv_init(struct command_context *cmd_ctx, struct target *target)
 {
 	oc_riscv_build_reg_cache(target);
 
+	target->state = TARGET_UNKNOWN;
+
 	return ERROR_OK;
 }
 
@@ -513,24 +515,31 @@ static int oc_riscv_state(struct target *target, uint8_t query)
 	return ERROR_OK;
 }
 
-static int oc_riscv_poll(struct target *target)
+static int oc_riscv_halted(struct target *target, enum target_state oldstate, int retval)
 {
-	int retval = oc_riscv_state(target, '?');
-
 	switch(target->state) {
 	case TARGET_HALTED:
 	case TARGET_DEBUG_RUNNING:
-		retval = oc_riscv_save_context(target);
-		target_call_event_callbacks(target, TARGET_EVENT_HALTED);
+		if(oldstate != target->state) {
+			retval = oc_riscv_save_context(target);
+			target_call_event_callbacks(target, TARGET_EVENT_HALTED);
+		}
 		break;
 	default: break;
 	}
 	return retval;
 }
 
+static int oc_riscv_poll(struct target *target)
+{
+        enum target_state oldstate = target->state;
+	return oc_riscv_halted(target, oldstate, oc_riscv_state(target, '?'));
+}
+
 static int oc_riscv_halt(struct target *target)
 {
-	return oc_riscv_state(target, 'H');
+        enum target_state oldstate = target->state;
+	return oc_riscv_halted(target, oldstate, oc_riscv_state(target, 'H'));
 }
 
 static int oc_riscv_resume(struct target *target, bool current,
@@ -617,7 +626,7 @@ static int oc_riscv_write_core_reg(struct target *target, unsigned int num)
 	oc_riscv->core_regs[num] = reg_value;
 	LOG_DEBUG("write core reg %i value %08" PRIx32, num, reg_value);
 	oc_riscv->core_cache->reg_list[num].valid = true;
-	oc_riscv->core_cache->reg_list[num].dirty = true;
+	oc_riscv->core_cache->reg_list[num].dirty = false;
 
 	return ERROR_OK;
 }
@@ -637,9 +646,9 @@ static int oc_riscv_add_breakpoint(struct target *target, struct breakpoint *bre
 				     4, 1, (uint8_t*)breakpoint->orig_instr);
 		oc_riscv_write_memory(target, breakpoint->address,
 				      4, 1, (uint8_t*)&ebreak);
-		fprintf(stderr, "Set breakpoint to %08x, orig inst %08x -> %08x\n",
-			(uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr,
-			ebreak);
+		LOG_DEBUG("Set breakpoint to %08x, orig inst %08x -> %08x",
+			  (uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr,
+			  ebreak);
 		breakpoint->is_set = true;
 		return ERROR_OK;
 	} else {
@@ -653,8 +662,8 @@ static int oc_riscv_remove_breakpoint(struct target *target, struct breakpoint *
 		oc_riscv_write_memory(target, breakpoint->address,
 				      breakpoint->length, 1, (uint8_t*)breakpoint->orig_instr);
 		breakpoint->is_set = false;
-		fprintf(stderr, "Remove breakpoint to %08x, orig inst %08x\n",
-			(uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr);
+		LOG_DEBUG("Remove breakpoint to %08x, orig inst %08x",
+			  (uint32_t)(breakpoint->address), *(uint32_t*)breakpoint->orig_instr);
 		return ERROR_OK;
 	} else {
 		return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
