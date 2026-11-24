@@ -125,6 +125,7 @@ int dbgindex=0;
 #define JMPX1 0x8067
 #define READOUT_HI(i, data) (0x37 | i << 7 | ((data + 0x800) & 0xFFFFF000))
 #define READOUT_LO(i, data) (0x13 | i << 7 | i << 15 | (data & 0xFFF) << 20)
+#define READOUT_LO_ZERO(i, data) (0x13 | i << 7 | (data & 0xFFF) << 20)
 // Read to register x1
 #define READOPB(offset) (0x8003 | offset << 20)
 #define READOPW(offset) (0x9003 | offset << 20)
@@ -134,9 +135,9 @@ int dbgindex=0;
 			 ((offset & 0x000800) << 9) |	\
 			 ((offset & 0x0007FE) << 20))
 // write register x2 to offset(x1)
-#define WRITEOPB(offset) (0x00208023 | offset << 20)
-#define WRITEOPW(offset) (0x00209023 | offset << 20)
-#define WRITEOPL(offset) (0x0020A023 | offset << 20)
+#define WRITEOPB(offset) (0x00110023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
+#define WRITEOPW(offset) (0x00111023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
+#define WRITEOPL(offset) (0x00112023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
 
 #define TERMSPEED 4000000
 
@@ -174,6 +175,8 @@ static void oc_riscv_write_byte(uint8_t byte)
 {
 	if(dbgindex < WRITEOUTSIZE)
 		dbgbuf[dbgindex++] = byte;
+	else
+		LOG_ERROR("dbgindex overflow");
 }
 static void oc_riscv_writeout(struct target *target)
 {
@@ -198,11 +201,13 @@ static void oc_riscv_write_inst(uint32_t inst)
 }
 static void oc_riscv_write_Einst(uint32_t inst)
 {
+	LOG_DEBUG("E inst %08x", inst);
 	oc_riscv_write_byte('E');
 	oc_riscv_write_inst(inst);
 }
 static void oc_riscv_write_Xinst(uint32_t inst)
 {
+	LOG_DEBUG("X inst %08x", inst);
 	oc_riscv_write_byte('X');
 	oc_riscv_write_inst(inst);
 }
@@ -223,9 +228,13 @@ static void oc_riscv_gen_regs()
 }
 static void oc_riscv_write_reg(uint32_t i, uint32_t data)
 {
-	if((data >= 0x800) || (data < 0xFFFFF800))
+	if(((data + 0x800) & 0xFFFFF000) != 0) {
 		oc_riscv_write_Einst(READOUT_HI(i, data));
-	oc_riscv_write_Einst(READOUT_LO(i, data));
+		if((data & 0xFFF) != 0)
+			oc_riscv_write_Einst(READOUT_LO(i, data));
+	} else {
+		oc_riscv_write_Einst(READOUT_LO_ZERO(i, data));
+	}
 }
 static void oc_riscv_gen_write_pc(uint32_t pc, uint32_t data)
 {
@@ -239,9 +248,9 @@ static void oc_riscv_gen_write_pc(uint32_t pc, uint32_t data)
 static void oc_riscv_gen_reg_writes(uint32_t pc, uint32_t regs[])
 {
 	int i;
-	oc_riscv_gen_write_pc(pc, regs[32]);
-	for(i=0; i<32; i++)
+	for(i=0; i<OC_RISCV_PC; i++)
 		oc_riscv_write_reg(i, regs[i]);
+	oc_riscv_gen_write_pc(pc, regs[OC_RISCV_PC]);
 }
 static uint32_t oc_riscv_read_reg(struct target * target, uint32_t i)
 {
@@ -309,17 +318,29 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 static int oc_riscv_adapter_write_memory(struct target *target,
 		uint32_t addr, int size, int count, const void *buf)
 {
-	int i;
+	int i, j;
+	uint32_t out;
 	uint64_t x1_2 = oc_riscv_read_2regs(target, 1, 2);
-	oc_riscv_write_reg(1, addr);
-	for(i=0; i<count; i++) {
+	oc_riscv_write_reg(2, addr);
+	for(i=0, j=0; i<count; i++, j++) {
 		switch(size) {
-		case 1: oc_riscv_write_reg(2, ((uint8_t*)buf)[i]);
-			oc_riscv_write_Einst(WRITEOPB(i)); break;
-		case 2: oc_riscv_write_reg(2, ((uint16_t*)buf)[i]);
-			oc_riscv_write_Einst(WRITEOPW(i*2)); break;
-		case 4: oc_riscv_write_reg(2, ((uint32_t*)buf)[i]);
-			oc_riscv_write_Einst(WRITEOPL(i*4)); break;
+		case 1: out = ((uint8_t*)buf)[i]; break;
+		case 2: out = ((uint16_t*)buf)[i]; break;
+		case 4: out = ((uint32_t*)buf)[i]; break;
+		default: out = 0;
+		}
+		oc_riscv_write_reg(1, out);
+		LOG_DEBUG("write %08x=%08x", addr+i*size, out);
+		switch(size) {
+		case 1: oc_riscv_write_Einst(WRITEOPB(j)); break;
+		case 2: oc_riscv_write_Einst(WRITEOPW(j*2)); break;
+		case 4: oc_riscv_write_Einst(WRITEOPL(j*4)); break;
+		}
+		if(j>=0x40) {
+			addr += j*size;
+			j=0;
+			oc_riscv_write_reg(1, addr);
+			oc_riscv_writeout(target);
 		}
 	}
 	oc_riscv_write_reg(1, x1_2 & 0xFFFFFFFF);
@@ -338,7 +359,8 @@ static int oc_riscv_read_regs(struct target *target, uint32_t regs[])
 
 static int oc_riscv_write_regs(struct target *target, uint32_t regs[])
 {
-	oc_riscv_gen_reg_writes(oc_riscv_read_pc(target), regs);
+	uint32_t pc = oc_riscv_read_pc(target);
+	oc_riscv_gen_reg_writes(pc, regs);
 	oc_riscv_writeout(target);
 	return ERROR_OK;
 }
