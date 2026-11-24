@@ -376,11 +376,13 @@ static int oc_riscv_get_core_reg(struct reg *reg)
 
 static int oc_riscv_set_core_reg(struct reg *reg, uint8_t *buf)
 {
-	memcpy(reg->value, buf, 4);
-	reg->dirty = true;
-	reg->valid = true;
-
-	return ERROR_OK;
+	struct oc_riscv_core_reg *oc_riscv_reg = reg->arch_info;
+	struct target *target = oc_riscv_reg->target;
+	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
+	LOG_DEBUG("set core reg %s = %08x", reg->name, *(uint32_t*)buf);
+        memcpy(reg->value, buf, 4);
+	oc_riscv->write_core_reg(target, oc_riscv_reg->num);
+	return oc_riscv_restore_context(target);
 }
 
 static int oc_riscv_save_context(struct target *target)
@@ -613,9 +615,9 @@ static int oc_riscv_write_core_reg(struct target *target, unsigned int num)
 
 	memcpy(&reg_value, oc_riscv->core_cache->reg_list[num].value, 4);
 	oc_riscv->core_regs[num] = reg_value;
-	LOG_DEBUG("write core reg %i value %08x" PRIx32, num, reg_value);
+	LOG_DEBUG("write core reg %i value %08" PRIx32, num, reg_value);
 	oc_riscv->core_cache->reg_list[num].valid = true;
-	oc_riscv->core_cache->reg_list[num].dirty = false;
+	oc_riscv->core_cache->reg_list[num].dirty = true;
 
 	return ERROR_OK;
 }
