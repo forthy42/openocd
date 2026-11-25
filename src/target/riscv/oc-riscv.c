@@ -127,17 +127,17 @@ struct oc_riscv_common {
 #define READOUT_LO(i, data) (0x13 | i << 7 | i << 15 | (data & 0xFFF) << 20)
 #define READOUT_LO_ZERO(i, data) (0x13 | i << 7 | (data & 0xFFF) << 20)
 // Read to register x1
-#define READOPB(offset) (0x8003 | offset << 20)
-#define READOPW(offset) (0x9003 | offset << 20)
-#define READOPL(offset) (0xA003 | offset << 20)
+#define READOPB(i, offset) (0x0003 | (i) << 15 | (offset) << 20)
+#define READOPW(i, offset) (0x1003 | (i) << 15 | (offset) << 20)
+#define READOPL(i, offset) (0x2003 | (i) << 15 | (offset) << 20)
 #define JMP_IMM(offset) (((offset & 0x100000) << 11) |	\
 			 (offset & 0x0FF000) |		\
 			 ((offset & 0x000800) << 9) |	\
 			 ((offset & 0x0007FE) << 20))
 // write register x2 to offset(x1)
-#define WRITEOPB(offset) (0x00110023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
-#define WRITEOPW(offset) (0x00111023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
-#define WRITEOPL(offset) (0x00112023 | (offset & 0x1F) << 7 | (offset & 0xFE0) << 20)
+#define WRITEOPB(i, j, offset) (0x00000023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
+#define WRITEOPW(i, j, offset) (0x00001023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
+#define WRITEOPL(i, j, offset) (0x00002023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
 
 #define TERMSPEED 4000000
 
@@ -288,9 +288,9 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 	oc_riscv_write_reg(target, 1, addr);
 	for(i=0; i<count; i++) {
 		switch(size) {
-		case 1: oc_riscv_write_Xinst(target, READOPB(i)); break;
-		case 2: oc_riscv_write_Xinst(target, READOPW(i*2)); break;
-		case 4: oc_riscv_write_Xinst(target, READOPL(i*4)); break;
+		case 1: oc_riscv_write_Xinst(target, READOPB(1, i)); break;
+		case 2: oc_riscv_write_Xinst(target, READOPW(1, i*2)); break;
+		case 4: oc_riscv_write_Xinst(target, READOPL(1, i*4)); break;
 		}
 	}
 	oc_riscv_write_reg(target, 1, x1);
@@ -323,9 +323,9 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 		oc_riscv_write_reg(target, 1, out);
 		LOG_DEBUG("write %08x=%08x", addr+i*size, out);
 		switch(size) {
-		case 1: oc_riscv_write_Einst(target, WRITEOPB(j)); break;
-		case 2: oc_riscv_write_Einst(target, WRITEOPW(j*2)); break;
-		case 4: oc_riscv_write_Einst(target, WRITEOPL(j*4)); break;
+		case 1: oc_riscv_write_Einst(target, WRITEOPB(1, 2, j)); break;
+		case 2: oc_riscv_write_Einst(target, WRITEOPW(1, 2, j*2)); break;
+		case 4: oc_riscv_write_Einst(target, WRITEOPL(1, 2, j*4)); break;
 		}
 		if(j>=0x40) {
 			addr += j*size;
