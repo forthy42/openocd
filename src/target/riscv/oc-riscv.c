@@ -126,7 +126,7 @@ struct oc_riscv_common {
 #define READOUT_HI(i, data) (0x37 | (i) << 7 | (((data) + 0x800) & 0xFFFFF000))
 #define READOUT_LO(i, data) (0x13 | (i) << 7 | (i) << 15 | ((data) & 0xFFF) << 20)
 #define READOUT_LO_ZERO(i, data) (0x13 | (i) << 7 | ((data) & 0xFFF) << 20)
-// load/store operations
+// load/store operation size
 #define BYTE 0x0000
 #define WORD 0x1000
 #define LONG 0x2000
@@ -135,10 +135,12 @@ struct oc_riscv_common {
 // write register j to offset(i)
 #define WRITEOP(i, j, offset) (0x23 | (j) << 15 | ((offset) & 0x1F) << 7 \
 			       | ((i) | ((offset) & 0xFE0)) << 20)
-#define JMP_IMM(offset) (((offset & 0x100000) << 11) |	\
-			 (offset & 0x0FF000) |		\
-			 ((offset & 0x000800) << 9) |	\
-			 ((offset & 0x0007FE) << 20))
+// if you want to see an even more hellish immediate, look at the 16 bit
+// conditional jumps!
+#define JMP_IMM(offset) ((((offset) & 0x100000) << 11) | \
+			 ((offset) & 0x0FF000)         | \
+			 (((offset) & 0x000800) << 9)  | \
+			 (((offset) & 0x0007FE) << 20))
 
 #define TERMSPEED 4000000
 
