@@ -99,6 +99,8 @@ struct oc_riscv_core_reg {
 	struct target *target;
 };
 
+#define WRITEOUTSIZE 0x1000
+
 struct oc_riscv_common {
 	unsigned int common_magic;
 
@@ -110,15 +112,13 @@ struct oc_riscv_common {
 	uint32_t uart_id;
 	uint32_t uart_speed;
 	FILE * uart;
+	char dbgbuf[WRITEOUTSIZE];
+	int dbgindex;
 
 	/* register cache to processor synchronization */
 	int (*read_core_reg)(struct target *target, unsigned int num);
 	int (*write_core_reg)(struct target *target, unsigned int num);
 };
-
-#define WRITEOUTSIZE 0x1000
-char dbgbuf[WRITEOUTSIZE];
-int dbgindex=0;
 
 #define JMPNOP 0x6F
 #define READREG_INST(i) (((i)==OC_RISCV_PC) ? JMPNOP : (0x13 | (i) << 15))
@@ -165,99 +165,100 @@ static void oc_riscv_open_target(struct target *target)
 	
 	snprintf(uart_filename, sizeof(uart_filename),
 		 "/dev/ttyUSB%d", oc_riscv->uart_id);
-	dbgindex = 0;
+	oc_riscv->dbgindex = 0;
 	oc_riscv->uart = fopen(uart_filename, "r+");
 	LOG_DEBUG("Open UART %s=%d", uart_filename, fileno(oc_riscv->uart));
 	oc_riscv_adapter_speed(target, TERMSPEED);
 	oc_riscv->uart_configured = 1;
 }
-static void oc_riscv_write_byte(uint8_t byte)
+static void oc_riscv_write_byte(struct target *target, uint8_t byte)
 {
-	if(dbgindex < WRITEOUTSIZE)
-		dbgbuf[dbgindex++] = byte;
+	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
+	if(oc_riscv->dbgindex < WRITEOUTSIZE)
+		oc_riscv->dbgbuf[oc_riscv->dbgindex++] = byte;
 	else
 		LOG_ERROR("dbgindex overflow");
 }
 static void oc_riscv_writeout(struct target *target)
 {
 	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
-	fwrite(dbgbuf, dbgindex, 1, oc_riscv->uart);
-	dbgindex=0;
+	fwrite(oc_riscv->dbgbuf, oc_riscv->dbgindex, 1, oc_riscv->uart);
+	oc_riscv->dbgindex=0;
 }
 static uint32_t oc_riscv_readin(struct target * target, uint8_t* buf, size_t count)
 {
 	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
 	return fread(buf, count, 1, oc_riscv->uart);
 }
-static void oc_riscv_write_inst(uint32_t inst)
+static void oc_riscv_write_inst(struct target *target, uint32_t inst)
 {
-	oc_riscv_write_byte(inst);
+	oc_riscv_write_byte(target, inst);
 	inst >>= 8;
-	oc_riscv_write_byte(inst);
+	oc_riscv_write_byte(target, inst);
 	inst >>= 8;
-	oc_riscv_write_byte(inst);
+	oc_riscv_write_byte(target, inst);
 	inst >>= 8;
-	oc_riscv_write_byte(inst);
+	oc_riscv_write_byte(target, inst);
 }
-static void oc_riscv_write_Einst(uint32_t inst)
+static void oc_riscv_write_Einst(struct target *target, uint32_t inst)
 {
 	LOG_DEBUG("E inst %08x", inst);
-	oc_riscv_write_byte('E');
-	oc_riscv_write_inst(inst);
+	oc_riscv_write_byte(target, 'E');
+	oc_riscv_write_inst(target, inst);
 }
-static void oc_riscv_write_Xinst(uint32_t inst)
+static void oc_riscv_write_Xinst(struct target *target, uint32_t inst)
 {
 	LOG_DEBUG("X inst %08x", inst);
-	oc_riscv_write_byte('X');
-	oc_riscv_write_inst(inst);
+	oc_riscv_write_byte(target, 'X');
+	oc_riscv_write_inst(target, inst);
 }
 static uint32_t oc_riscv_read_pc(struct target *target)
 {
 	uint32_t tmpbuf;
-	oc_riscv_write_Xinst(JMPNOP);
+	oc_riscv_write_Xinst(target, JMPNOP);
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t*)&tmpbuf, 4);
 	return tmpbuf;
 }
-static void oc_riscv_gen_regs()
+static void oc_riscv_gen_regs(struct target *target)
 {
 	int i;
 	for(i=0; i<32; i++)
-		oc_riscv_write_Xinst(READREG_INST(i));
-	oc_riscv_write_Xinst(JMPNOP);
+		oc_riscv_write_Xinst(target, READREG_INST(i));
+	oc_riscv_write_Xinst(target, JMPNOP);
 }
-static void oc_riscv_write_reg(uint32_t i, uint32_t data)
+static void oc_riscv_write_reg(struct target *target, uint32_t i, uint32_t data)
 {
 	if(((data + 0x800) & 0xFFFFF000) != 0) {
-		oc_riscv_write_Einst(READOUT_HI(i, data));
+		oc_riscv_write_Einst(target, READOUT_HI(i, data));
 		if((data & 0xFFF) != 0)
-			oc_riscv_write_Einst(READOUT_LO(i, data));
+			oc_riscv_write_Einst(target, READOUT_LO(i, data));
 	} else {
-		oc_riscv_write_Einst(READOUT_LO_ZERO(i, data));
+		oc_riscv_write_Einst(target, READOUT_LO_ZERO(i, data));
 	}
 }
-static void oc_riscv_gen_write_pc(uint32_t pc, uint32_t data)
+static void oc_riscv_gen_write_pc(struct target *target, uint32_t pc, uint32_t data)
 {
 	if(((data-pc) + 0x100000) < 0x200000) {
-		oc_riscv_write_Einst(JMP_IMM((data-pc)) | JMPNOP);
+		oc_riscv_write_Einst(target, JMP_IMM((data-pc)) | JMPNOP);
 	} else {
 		// globbers x1
-		oc_riscv_write_Einst(READOUT_HI(1, data));
-		oc_riscv_write_Einst(JMP(1, (data & 0xFFF)));
+		oc_riscv_write_Einst(target, READOUT_HI(1, data));
+		oc_riscv_write_Einst(target, JMP(1, (data & 0xFFF)));
 	}
 }
-static void oc_riscv_gen_reg_writes(uint32_t pc, uint32_t regs[])
+static void oc_riscv_gen_reg_writes(struct target *target, uint32_t pc, uint32_t regs[])
 {
 	int i;
 	// write the PC first, may globber x1
-	oc_riscv_gen_write_pc(pc, regs[OC_RISCV_PC]);
+	oc_riscv_gen_write_pc(target, pc, regs[OC_RISCV_PC]);
 	for(i=0; i<OC_RISCV_PC; i++)
-		oc_riscv_write_reg(i, regs[i]);
+		oc_riscv_write_reg(target, i, regs[i]);
 }
 static uint32_t oc_riscv_read_reg(struct target * target, uint32_t i)
 {
 	uint32_t tmpbuf;
-	oc_riscv_write_Xinst(READREG_INST(i));
+	oc_riscv_write_Xinst(target, READREG_INST(i));
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t*)&tmpbuf, 4);
 	return tmpbuf;
@@ -265,8 +266,8 @@ static uint32_t oc_riscv_read_reg(struct target * target, uint32_t i)
 static uint64_t oc_riscv_read_2regs(struct target * target, uint32_t i, uint32_t j)
 {
 	uint64_t tmpbuf;
-	oc_riscv_write_Xinst(READREG_INST(i));
-	oc_riscv_write_Xinst(READREG_INST(j));
+	oc_riscv_write_Xinst(target, READREG_INST(i));
+	oc_riscv_write_Xinst(target, READREG_INST(j));
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t*)&tmpbuf, sizeof(tmpbuf));
 	return tmpbuf;
@@ -284,15 +285,15 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 	uint32_t tmpbuf[count];
 	uint32_t x1 = oc_riscv_read_reg(target, 1);
 	
-	oc_riscv_write_reg(1, addr);
+	oc_riscv_write_reg(target, 1, addr);
 	for(i=0; i<count; i++) {
 		switch(size) {
-		case 1: oc_riscv_write_Xinst(READOPB(i)); break;
-		case 2: oc_riscv_write_Xinst(READOPW(i*2)); break;
-		case 4: oc_riscv_write_Xinst(READOPL(i*4)); break;
+		case 1: oc_riscv_write_Xinst(target, READOPB(i)); break;
+		case 2: oc_riscv_write_Xinst(target, READOPW(i*2)); break;
+		case 4: oc_riscv_write_Xinst(target, READOPL(i*4)); break;
 		}
 	}
-	oc_riscv_write_reg(1, x1);
+	oc_riscv_write_reg(target, 1, x1);
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t*)tmpbuf, count*4);
 	for(i=0; i<count; i++) {
@@ -311,7 +312,7 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 	int i, j;
 	uint32_t out;
 	uint64_t x1_2 = oc_riscv_read_2regs(target, 1, 2);
-	oc_riscv_write_reg(2, addr);
+	oc_riscv_write_reg(target, 2, addr);
 	for(i=0, j=0; i<count; i++, j++) {
 		switch(size) {
 		case 1: out = ((uint8_t*)buf)[i]; break;
@@ -319,29 +320,29 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 		case 4: out = ((uint32_t*)buf)[i]; break;
 		default: out = 0;
 		}
-		oc_riscv_write_reg(1, out);
+		oc_riscv_write_reg(target, 1, out);
 		LOG_DEBUG("write %08x=%08x", addr+i*size, out);
 		switch(size) {
-		case 1: oc_riscv_write_Einst(WRITEOPB(j)); break;
-		case 2: oc_riscv_write_Einst(WRITEOPW(j*2)); break;
-		case 4: oc_riscv_write_Einst(WRITEOPL(j*4)); break;
+		case 1: oc_riscv_write_Einst(target, WRITEOPB(j)); break;
+		case 2: oc_riscv_write_Einst(target, WRITEOPW(j*2)); break;
+		case 4: oc_riscv_write_Einst(target, WRITEOPL(j*4)); break;
 		}
 		if(j>=0x40) {
 			addr += j*size;
 			j=0;
-			oc_riscv_write_reg(1, addr);
+			oc_riscv_write_reg(target, 1, addr);
 			oc_riscv_writeout(target);
 		}
 	}
-	oc_riscv_write_reg(1, x1_2 & 0xFFFFFFFF);
-	oc_riscv_write_reg(2, x1_2 >> 32);
+	oc_riscv_write_reg(target, 1, x1_2 & 0xFFFFFFFF);
+	oc_riscv_write_reg(target, 2, x1_2 >> 32);
 	oc_riscv_writeout(target);
 	return ERROR_OK;
 }
 
 static int oc_riscv_read_regs(struct target *target, uint32_t regs[])
 {
-	oc_riscv_gen_regs();
+	oc_riscv_gen_regs(target);
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, (uint8_t *)regs, OC_RISCV_NUM_REGS*4);
 	return ERROR_OK;
@@ -350,7 +351,7 @@ static int oc_riscv_read_regs(struct target *target, uint32_t regs[])
 static int oc_riscv_write_regs(struct target *target, uint32_t regs[])
 {
 	uint32_t pc = oc_riscv_read_pc(target);
-	oc_riscv_gen_reg_writes(pc, regs);
+	oc_riscv_gen_reg_writes(target, pc, regs);
 	oc_riscv_writeout(target);
 	return ERROR_OK;
 }
@@ -462,7 +463,7 @@ static int oc_riscv_devicename(struct target *target)
 	
 	target->state = TARGET_UNKNOWN;
 	
-	oc_riscv_write_byte('I');
+	oc_riscv_write_byte(target, 'I');
 	oc_riscv_writeout(target);
 	devicename[8]=0;
 	oc_riscv_readin(target, (uint8_t*)devicename, 8);
@@ -480,7 +481,7 @@ static int oc_riscv_state(struct target *target, uint8_t query)
 
 	target->state = TARGET_UNKNOWN;
 	
-	oc_riscv_write_byte(query);
+	oc_riscv_write_byte(target, query);
 	oc_riscv_writeout(target);
 	oc_riscv_readin(target, &state, 1);
 
@@ -552,7 +553,7 @@ static int oc_riscv_resume(struct target *target, bool current,
 	}
 	
 	oc_riscv_restore_context(target);
-	oc_riscv_write_Einst(JMPNOP);
+	oc_riscv_write_Einst(target, JMPNOP);
 	oc_riscv_writeout(target);
 
 	int result = oc_riscv_state(target, 'R');
@@ -714,7 +715,7 @@ static struct reg_cache *oc_riscv_build_reg_cache(struct target *target)
 
 		reg_list[i].reg_data_type = calloc(1, sizeof(struct reg_data_type));
 		if (reg_list[i].reg_data_type)
-		  reg_list[i].reg_data_type->type = regno_type;
+			reg_list[i].reg_data_type->type = regno_type;
 		else {
 			LOG_ERROR("unable to allocate reg type list");
 			return NULL;
@@ -791,7 +792,7 @@ static int oc_riscv_step(struct target *target, bool current,
 	}
 
 	oc_riscv_restore_context(target);
-	oc_riscv_write_Einst(JMPNOP);
+	oc_riscv_write_Einst(target, JMPNOP);
 	oc_riscv_writeout(target);
 
 	int result = oc_riscv_state(target, 'S');
