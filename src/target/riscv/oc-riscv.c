@@ -120,9 +120,9 @@ struct oc_riscv_common {
 char dbgbuf[WRITEOUTSIZE];
 int dbgindex=0;
 
-#define READREG_INST(i) (0x13 | i << 15)
 #define JMPNOP 0x6F
-#define JMPX1 0x8067
+#define READREG_INST(i) (((i)==OC_RISCV_PC) ? JMPNOP : (0x13 | (i) << 15))
+#define JMP(i, offset) (0x67 | (i) << 15 | (offset) << 20)
 #define READOUT_HI(i, data) (0x37 | i << 7 | ((data + 0x800) & 0xFFFFF000))
 #define READOUT_LO(i, data) (0x13 | i << 7 | i << 15 | (data & 0xFFF) << 20)
 #define READOUT_LO_ZERO(i, data) (0x13 | i << 7 | (data & 0xFFF) << 20)
@@ -238,19 +238,21 @@ static void oc_riscv_write_reg(uint32_t i, uint32_t data)
 }
 static void oc_riscv_gen_write_pc(uint32_t pc, uint32_t data)
 {
-	if(((data-pc) < 0x100000) || ((pc-data) < 0x100000)) {
+	if(((data-pc) + 0x100000) < 0x200000) {
 		oc_riscv_write_Einst(JMP_IMM((data-pc)) | JMPNOP);
 	} else {
+		// globbers x1
 		oc_riscv_write_Einst(READOUT_HI(1, data));
-		oc_riscv_write_Einst(JMPX1 | ((data & 0xFFF) << 20));
+		oc_riscv_write_Einst(JMP(1, (data & 0xFFF)));
 	}
 }
 static void oc_riscv_gen_reg_writes(uint32_t pc, uint32_t regs[])
 {
 	int i;
+	// write the PC first, may globber x1
+	oc_riscv_gen_write_pc(pc, regs[OC_RISCV_PC]);
 	for(i=0; i<OC_RISCV_PC; i++)
 		oc_riscv_write_reg(i, regs[i]);
-	oc_riscv_gen_write_pc(pc, regs[OC_RISCV_PC]);
 }
 static uint32_t oc_riscv_read_reg(struct target * target, uint32_t i)
 {
@@ -266,20 +268,8 @@ static uint64_t oc_riscv_read_2regs(struct target * target, uint32_t i, uint32_t
 	oc_riscv_write_Xinst(READREG_INST(i));
 	oc_riscv_write_Xinst(READREG_INST(j));
 	oc_riscv_writeout(target);
-	oc_riscv_readin(target, (uint8_t*)&tmpbuf, 8);
+	oc_riscv_readin(target, (uint8_t*)&tmpbuf, sizeof(tmpbuf));
 	return tmpbuf;
-}
-static void oc_riscv_write_pc(struct target * target, uint32_t data, uint32_t pc)
-{
-	if(((data-pc) < 0x100000) || ((pc-data) < 0x100000)) {
-		oc_riscv_write_Einst(JMP_IMM((data-pc)) | JMPNOP);
-	} else {
-		uint32_t x1 = oc_riscv_read_reg(target, 1);
-		oc_riscv_write_Einst(READOUT_HI(1, data));
-		oc_riscv_write_Einst(JMPX1 | ((data & 0xFFF) << 20));
-		oc_riscv_write_reg(1, x1);
-		oc_riscv_writeout(target);
-	}
 }
 
 static struct oc_riscv_common *target_to_oc_riscv(struct target *target)
@@ -546,6 +536,8 @@ static int oc_riscv_resume(struct target *target, bool current,
 		target_addr_t address, bool handle_breakpoints,
 		bool debug_execution)
 {
+	struct oc_riscv_common *oc_riscv = target_to_oc_riscv(target);
+
 	LOG_DEBUG("%d " TARGET_ADDR_FMT " %d %d", current, address,
 			handle_breakpoints, debug_execution);
 
@@ -554,18 +546,16 @@ static int oc_riscv_resume(struct target *target, bool current,
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	oc_riscv_restore_context(target);
-	
-	if(current) {
-		oc_riscv_write_Einst(JMPNOP);
-		oc_riscv_writeout(target);
-	} else {
-		oc_riscv_write_pc(target, address, oc_riscv_read_pc(target));
-		// do one step for this instruction
+	if(!current) {
+		memcpy(oc_riscv->core_cache->reg_list[OC_RISCV_PC].value, &address, 4);
+		oc_riscv->write_core_reg(target, OC_RISCV_PC);
 	}
+	
+	oc_riscv_restore_context(target);
+	oc_riscv_write_Einst(JMPNOP);
+	oc_riscv_writeout(target);
 
 	int result = oc_riscv_state(target, 'R');
-	oc_riscv_writeout(target);
 	return result;
 }
 
@@ -604,7 +594,6 @@ static int oc_riscv_read_core_reg(struct target *target, unsigned int num)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	reg_value = oc_riscv->core_regs[num];
-	LOG_DEBUG("read core reg %i value 0x%" PRIx32, num, reg_value);
 	memcpy(oc_riscv->core_cache->reg_list[num].value, &reg_value, 4);
 	oc_riscv->core_cache->reg_list[num].valid = true;
 	oc_riscv->core_cache->reg_list[num].dirty = false;
@@ -624,7 +613,6 @@ static int oc_riscv_write_core_reg(struct target *target, unsigned int num)
 
 	memcpy(&reg_value, oc_riscv->core_cache->reg_list[num].value, 4);
 	oc_riscv->core_regs[num] = reg_value;
-	LOG_DEBUG("write core reg %i value %08" PRIx32, num, reg_value);
 	oc_riscv->core_cache->reg_list[num].valid = true;
 	oc_riscv->core_cache->reg_list[num].dirty = false;
 
@@ -803,17 +791,10 @@ static int oc_riscv_step(struct target *target, bool current,
 	}
 
 	oc_riscv_restore_context(target);
-
-	if(current) {
-		oc_riscv_write_Einst(JMPNOP);
-		oc_riscv_writeout(target);
-	} else {
-		oc_riscv_write_pc(target, address, oc_riscv_read_pc(target));
-		// do one step for this instruction
-	}
+	oc_riscv_write_Einst(JMPNOP);
+	oc_riscv_writeout(target);
 
 	int result = oc_riscv_state(target, 'S');
-	oc_riscv_writeout(target);
 	return result;
 }
 
