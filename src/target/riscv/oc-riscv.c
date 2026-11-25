@@ -123,21 +123,22 @@ struct oc_riscv_common {
 #define JMPNOP 0x6F
 #define READREG_INST(i) (((i)==OC_RISCV_PC) ? JMPNOP : (0x13 | (i) << 15))
 #define JMP(i, offset) (0x67 | (i) << 15 | (offset) << 20)
-#define READOUT_HI(i, data) (0x37 | i << 7 | ((data + 0x800) & 0xFFFFF000))
-#define READOUT_LO(i, data) (0x13 | i << 7 | i << 15 | (data & 0xFFF) << 20)
-#define READOUT_LO_ZERO(i, data) (0x13 | i << 7 | (data & 0xFFF) << 20)
-// Read to register x1
-#define READOPB(i, offset) (0x0003 | (i) << 15 | (offset) << 20)
-#define READOPW(i, offset) (0x1003 | (i) << 15 | (offset) << 20)
-#define READOPL(i, offset) (0x2003 | (i) << 15 | (offset) << 20)
+#define READOUT_HI(i, data) (0x37 | (i) << 7 | (((data) + 0x800) & 0xFFFFF000))
+#define READOUT_LO(i, data) (0x13 | (i) << 7 | (i) << 15 | ((data) & 0xFFF) << 20)
+#define READOUT_LO_ZERO(i, data) (0x13 | (i) << 7 | ((data) & 0xFFF) << 20)
+// load/store operations
+#define BYTE 0x0000
+#define WORD 0x1000
+#define LONG 0x2000
+// read offset(i) to rd
+#define READOP(i, offset) (0x03 | (i) << 15 | (offset) << 20)
+// write register j to offset(i)
+#define WRITEOP(i, j, offset) (0x23 | (j) << 15 | ((offset) & 0x1F) << 7 \
+			       | ((i) | ((offset) & 0xFE0)) << 20)
 #define JMP_IMM(offset) (((offset & 0x100000) << 11) |	\
 			 (offset & 0x0FF000) |		\
 			 ((offset & 0x000800) << 9) |	\
 			 ((offset & 0x0007FE) << 20))
-// write register x2 to offset(x1)
-#define WRITEOPB(i, j, offset) (0x00000023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
-#define WRITEOPW(i, j, offset) (0x00001023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
-#define WRITEOPL(i, j, offset) (0x00002023 | (j) << 15 | (offset & 0x1F) << 7 | ((i) | ((offset) & 0xFE0)) << 20)
 
 #define TERMSPEED 4000000
 
@@ -288,9 +289,9 @@ static int oc_riscv_adapter_read_memory(struct target *target,
 	oc_riscv_write_reg(target, 1, addr);
 	for(i=0; i<count; i++) {
 		switch(size) {
-		case 1: oc_riscv_write_Xinst(target, READOPB(1, i)); break;
-		case 2: oc_riscv_write_Xinst(target, READOPW(1, i*2)); break;
-		case 4: oc_riscv_write_Xinst(target, READOPL(1, i*4)); break;
+		case 1: oc_riscv_write_Xinst(target, BYTE | READOP(1, i)); break;
+		case 2: oc_riscv_write_Xinst(target, WORD | READOP(1, i*2)); break;
+		case 4: oc_riscv_write_Xinst(target, LONG | READOP(1, i*4)); break;
 		}
 	}
 	oc_riscv_write_reg(target, 1, x1);
@@ -323,9 +324,9 @@ static int oc_riscv_adapter_write_memory(struct target *target,
 		oc_riscv_write_reg(target, 1, out);
 		LOG_DEBUG("write %08x=%08x", addr+i*size, out);
 		switch(size) {
-		case 1: oc_riscv_write_Einst(target, WRITEOPB(1, 2, j)); break;
-		case 2: oc_riscv_write_Einst(target, WRITEOPW(1, 2, j*2)); break;
-		case 4: oc_riscv_write_Einst(target, WRITEOPL(1, 2, j*4)); break;
+		case 1: oc_riscv_write_Einst(target, BYTE | WRITEOP(1, 2, j)); break;
+		case 2: oc_riscv_write_Einst(target, WORD | WRITEOP(1, 2, j*2)); break;
+		case 4: oc_riscv_write_Einst(target, LONG | WRITEOP(1, 2, j*4)); break;
 		}
 		if(j>=0x40) {
 			addr += j*size;
